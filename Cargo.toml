@@ -10,8 +10,9 @@ members = [
     "lang/derive/*",
     "lang/syn",
     "spl",
+    "fuzz/anchor-test/*",
 ]
-exclude = ["tests/cfo/deps/openbook-dex", "tests/swap/deps/openbook-dex"]
+exclude = ["tests/cfo/deps/openbook-dex", "tests/swap/deps/openbook-dex", "fuzz/examples/*"]
 resolver = "2"
 [profile.release]
 lto = true
