@@ -45,6 +45,7 @@ use std::sync::LazyLock;
 
 mod checks;
 pub mod config;
+mod fuzz;
 pub mod rust_template;
 
 // Version of the docker image.
@@ -350,6 +351,11 @@ pub enum Command {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Commands for fuzzing the program
+    Fuzz {
+        #[clap(subcommand)]
+        cmd: FuzzCommand,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -504,6 +510,14 @@ pub enum IdlCommand {
 pub enum ClusterCommand {
     /// Prints common cluster urls.
     List,
+}
+
+#[derive(Debug, Parser)]
+pub enum FuzzCommand {
+    Init {
+        /// Name of the program to fuzz
+        program_name: String,
+    },
 }
 
 fn get_keypair(path: &str) -> Result<Keypair> {
@@ -915,6 +929,9 @@ fn process_command(opts: Opts) -> Result<()> {
             );
             Ok(())
         }
+        Command::Fuzz { cmd } => with_workspace(&opts.cfg_override, |_| match cmd {
+            FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
+        }),
     }
 }
 
