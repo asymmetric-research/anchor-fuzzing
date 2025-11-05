@@ -1,6 +1,7 @@
 use std::{env::current_dir, fs::create_dir, path::Path};
 
 use anyhow::{bail, Context, Result};
+use toml_edit::DocumentMut;
 
 pub fn fuzz_init(program_name: &str) -> Result<()> {
     // Check program exists
@@ -17,12 +18,35 @@ pub fn fuzz_init(program_name: &str) -> Result<()> {
 
 /// One-time function used to configure the workspace for fuzzing:
 /// 1. Create `fuzz` and `fuzz/.gitignore`
+/// 2. Add `fuzz/*` to `workspace.members``
 /// Does nothing if already configured
 fn configure_workspace_for_fuzzing(fuzz_dir: &Path) -> Result<()> {
+    use toml_edit::{Item, Value};
     if !fuzz_dir.exists() {
         create_dir(&fuzz_dir)?;
         std::fs::write(fuzz_dir.join(".gitignore"), "/target\n/crashes\n")
             .context("Failed to create .gitignore")?;
+        let toml_str =
+            std::fs::read_to_string("Cargo.toml").context("Failed to read workspace Cargo.toml")?;
+        let mut toml: DocumentMut = toml_str
+            .parse()
+            .context("Failed to parse workspace Cargo.toml")?;
+        let Item::Table(workspace) = toml
+            .entry("workspace")
+            .or_insert(Item::Table(Default::default()))
+        else {
+            bail!("`workspace` is not a table")
+        };
+        let Item::Value(Value::Array(members)) = workspace
+            .entry("members")
+            .or_insert(Item::Value(Value::Array(Default::default())))
+        else {
+            bail!("`workspace.members` is not an array")
+        };
+        if !members.iter().any(|m| m.as_str() == Some("fuzz/*")) {
+            members.push("fuzz/*");
+        }
+        std::fs::write("Cargo.toml", toml.to_string()).context("Failed to write new Cargo.toml")?;
     }
     Ok(())
 }
@@ -94,8 +118,7 @@ fn fuzz_target_manifest(program_name: &str) -> String {
     // TODO: Remove the below when our packages are upstreamed
     let anchor_dir = std::env::var("ANCHOR_DIR").expect("set `ANCHOR_DIR` to Anchor source path");
     format!(
-        r#"[workspace]
-[package]
+        r#"[package]
 name = "{program_name}_fuzz"
 version = "0.1.0"
 edition = "2021"
