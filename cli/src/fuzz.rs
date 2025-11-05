@@ -90,7 +90,7 @@ struct Fixture<'a> {{
 
 impl<'a> Fixture<'a> {{
     pub fn setup(ctx: &'a mut TestContext) -> Self {{
-        let program_id = Pubkey::new_from_array(program_name::ID.to_bytes());
+        let program_id = Pubkey::new_from_array({program_name}::ID.to_bytes());
         ctx.add_program(&program_id, "../../target/deploy/{program_name}.so").unwrap();
 
         // TODO: Initialize your program
