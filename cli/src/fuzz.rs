@@ -136,6 +136,9 @@ libafl_bolts = {{ version = "0.13", features = ["std"] }}
 solana-message = "2"
 
 {program_name} = {{ path = "../../programs/{program_name}", features = ["no-entrypoint"] }}
+
+[features]
+fuzz_{program_name} = []
 "#
     )
 }
