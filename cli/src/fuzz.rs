@@ -101,7 +101,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-litesvm = "0.7"
 solana-program = "2"
 solana-sdk = "2"
 anchor-test = {{ path = "{anchor_dir}/fuzz/anchor-test" }}
