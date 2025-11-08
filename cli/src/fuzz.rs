@@ -1,4 +1,4 @@
-use std::{env::current_dir, fs::create_dir, path::Path};
+use std::{env::current_dir, fs::create_dir, path::Path, io::Write};
 
 use anyhow::{bail, Context, Result};
 use toml_edit::DocumentMut;
@@ -91,7 +91,7 @@ struct Fixture<'a> {{
 impl<'a> Fixture<'a> {{
     pub fn setup(ctx: &'a mut TestContext) -> Self {{
         let program_id = Pubkey::new_from_array({program_name}::ID.to_bytes());
-        ctx.add_program(&program_id, "../../target/deploy/{program_name}.so").unwrap();
+        ctx.add_program(&program_id, "target/deploy/{program_name}.so").unwrap();
 
         // TODO: Initialize your program
 
@@ -124,16 +124,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-solana-program = "2"
-solana-sdk = "2"
 anchor-test = {{ path = "{anchor_dir}/fuzz/anchor-test" }}
 anchor-test-context = {{ path = "{anchor_dir}/fuzz/anchor-test/anchor-test-context" }}
 anchor-lang = {{ path = "{anchor_dir}/lang" }}
 arbitrary = {{ version = "1", features = ["derive"] }}
-once_cell = "1"
 libafl = {{ version = "0.13", features = ["std", "cli", "prelude"] }}
 libafl_bolts = {{ version = "0.13", features = ["std"] }}
-solana-message = "2"
+solana-message = "2.3"
+solana-sdk = "2.3"
 
 {program_name} = {{ path = "../../programs/{program_name}", features = ["no-entrypoint"] }}
 
@@ -141,4 +139,103 @@ solana-message = "2"
 fuzz_{program_name} = []
 "#
     )
+}
+
+pub fn fuzz_run(program_name: &str, test_name: &str, release: bool) -> Result<()> {
+    let cwd = current_dir()?;
+    let fuzz_dir = cwd.join("fuzz").join(program_name);
+    
+    if !fuzz_dir.exists() {
+        bail!("Fuzz directory for {} does not exist. Run `anchor fuzz init {}` first.", program_name, program_name);
+    }
+    
+    let mut args = vec![
+        "run".to_string(),
+        "--manifest-path".to_string(),
+        fuzz_dir.join("Cargo.toml").to_string_lossy().to_string(),
+        "--features".to_string(),
+        test_name.to_string(),
+    ];
+    
+    if release {
+        args.insert(1, "--release".to_string());
+    }
+    
+    let status = std::process::Command::new("cargo")
+        .args(&args)
+        .status()
+        .context("Failed to run cargo")?;
+    
+    if !status.success() {
+        bail!("Fuzz command failed");
+    }
+    
+    Ok(())
+}
+pub fn fuzz_show(program_name: &str, crash_file: &str) -> Result<()> {
+    let cwd = current_dir()?;
+    let fuzz_dir = cwd.join("fuzz").join(program_name);
+    
+    if !fuzz_dir.exists() {
+        bail!("Fuzz directory for {} does not exist. Run `anchor fuzz init {}` first.", program_name, program_name);
+    }
+    
+    // Treat crash_file as a path (absolute or relative to cwd)
+    let crash_path = Path::new(crash_file);
+    let crash_path = if crash_path.is_absolute() {
+        crash_path.to_path_buf()
+    } else {
+        cwd.join(crash_path)
+    };
+    
+    if !crash_path.exists() {
+        bail!("Crash file {} does not exist", crash_path.display());
+    }
+    
+    let crash_bytes = std::fs::read(&crash_path)
+        .context("Failed to read crash file")?;
+    
+    // Find the fuzz binary (check both debug and release)
+    let package_name = format!("{}_fuzz", program_name);
+    let binary_path = cwd
+        .join("target")
+        .join("release")
+        .join(&package_name);
+    
+    let binary_path = if binary_path.exists() {
+        binary_path
+    } else {
+        cwd.join("target").join("debug").join(&package_name)
+    };
+    
+    if !binary_path.exists() {
+        bail!(
+            "Fuzz binary not found. Build it first with: anchor fuzz run {} <test_name>",
+            program_name
+        );
+    }
+    
+    // Run with SHOW_CRASH=1
+    let mut child = std::process::Command::new(binary_path)
+        .env("SHOW_CRASH", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to spawn show process")?;
+    
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&crash_bytes)
+        .context("Failed to write crash data to stdin")?;
+    
+    let status = child.wait().context("Failed to wait for show process")?;
+    
+    if !status.success() {
+        bail!("Show command failed");
+    }
+    
+    Ok(())
 }

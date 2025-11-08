@@ -518,6 +518,21 @@ pub enum FuzzCommand {
         /// Name of the program to fuzz
         program_name: String,
     },
+    Show {
+        /// Name of the program
+        program_name: String,
+        /// Path to the crash file (relative to fuzz/<program>/crashes/)
+        crash_file: String,
+    },
+    Run {
+        /// Name of the program
+        program_name: String,
+        /// Name of the fuzz test function
+        test_name: String,
+        /// Run in release mode
+        #[clap(long)]
+        release: bool,
+    },
 }
 
 fn get_keypair(path: &str) -> Result<Keypair> {
@@ -931,6 +946,8 @@ fn process_command(opts: Opts) -> Result<()> {
         }
         Command::Fuzz { cmd } => with_workspace(&opts.cfg_override, |_| match cmd {
             FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
+            FuzzCommand::Show { program_name, crash_file } => fuzz::fuzz_show(&program_name, &crash_file),
+            FuzzCommand::Run { program_name, test_name, release } => fuzz::fuzz_run(&program_name, &test_name, release),
         }),
     }
 }
