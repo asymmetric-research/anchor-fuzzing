@@ -76,46 +76,83 @@ fn initialize_program_fuzzer(fuzz_dir: &Path, program_name: &str) -> Result<()> 
 }
 
 fn generate_program_fuzz_harness(program_name: &str) -> String {
-    let fuzzer = format!(
-        r#"use anchor_test::anchor_fuzz;
-use anchor_test_context::*;
-use {program_name}::*;
-use arbitrary::Arbitrary;
-use solana_sdk::{{signature::Keypair, system_program, pubkey::Pubkey}};
+    format!(
+        r#"use {program_name}::*;
+use anchor_test::*;
+use solana_sdk::{{signature::Keypair, system_program, pubkey::Pubkey, signature::Signer}};
+use std::rc::Rc;
 
-struct Fixture<'a> {{
-    ctx: &'a mut TestContext,
+#[derive(Clone)]
+struct {fixture_name} {{
+    ctx: TestContext,
     program_id: Pubkey,
+    // TODO: Add your state here (users, accounts, etc.)
 }}
 
-impl<'a> Fixture<'a> {{
-    pub fn setup(ctx: &'a mut TestContext) -> Self {{
-        let program_id = Pubkey::new_from_array({program_name}::ID.to_bytes());
+#[fuzz_fixture]
+impl {fixture_name} {{
+    /// Called ONCE to setup initial state (programs + accounts)
+    pub fn setup() -> Self {{
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_from_array(ID.to_bytes());
+        
+        // Load program
         ctx.add_program(&program_id, "target/deploy/{program_name}.so").unwrap();
-
-        // TODO: Initialize your program
-
+        
+        // TODO: Initialize your program state here
+        // Example:
+        // let user = Rc::new(Keypair::new());
+        // ctx.create_account()
+        //     .pubkey(user.pubkey())
+        //     .lamports(1_000_000_000)
+        //     .owner(system_program::id())
+        //     .create()
+        //     .unwrap();
+        
         Self {{ ctx, program_id }}
     }}
+
+    /// ACTIONS - Define actions that the fuzzer can call
+    
+    // TODO: Add your actions here
+    // Example action:
+    // pub fn action_do_something(&mut self, amount: u64) {{
+    //     let _ = self.ctx.program(self.program_id)
+    //         .call(instruction::DoSomething {{ amount }})
+    //         .accounts(accounts::DoSomething {{ /* ... */ }})
+    //         .signers(&[/* ... */])
+    //         .send();
+    // }}
 }}
 
 #[test]
 fn test_basic() {{
-    let mut ctx = TestContext::new();
-    let fixture = Fixture::setup(&mut ctx);
+    let fixture = {fixture_name}::setup();
+    // TODO: Add basic test assertions
 }}
 
-// TODO: Implement your fuzz test
+// Simple single-input fuzz test
 #[anchor_fuzz]
-fn fuzz_{program_name}(ctx: &mut TestContext, _data: Vec<u8>) {{
-    let fixture = Fixture::setup(ctx);
-}}"#
-    );
-    fuzzer
+fn fuzz_single(fixture: &mut {fixture_name}, amount: u64) {{
+    // TODO: Call your actions with the fuzzed input
+    // Example: fixture.action_do_something(amount);
+}}
+
+// Stateful invariant test - fuzzer generates random action sequences
+#[invariant_test]
+fn invariant_test(fixture: &mut {fixture_name}) {{
+    // TODO: Add invariant checks that should hold after every action
+    // Example:
+    // let total_balance = /* calculate total balance */;
+    // assert!(total_balance <= INITIAL_BALANCE, "Balance invariant violated");
+}}
+"#,
+        program_name = program_name,
+        fixture_name = to_pascal_case(program_name)
+    )
 }
 
 fn fuzz_target_manifest(program_name: &str) -> String {
-    // TODO: Remove the below when our packages are upstreamed
     let anchor_dir = std::env::var("ANCHOR_DIR").expect("set `ANCHOR_DIR` to Anchor source path");
     format!(
         r#"[package]
@@ -128,17 +165,30 @@ anchor-test = {{ path = "{anchor_dir}/fuzz/anchor-test" }}
 anchor-test-context = {{ path = "{anchor_dir}/fuzz/anchor-test/anchor-test-context" }}
 anchor-lang = {{ path = "{anchor_dir}/lang" }}
 arbitrary = {{ version = "1", features = ["derive"] }}
-libafl = {{ version = "0.13", features = ["std", "cli", "prelude"] }}
-libafl_bolts = {{ version = "0.13", features = ["std"] }}
+libafl = {{ version = "0.15.1", features = ["std", "cli", "prelude", "tui_monitor"] }}
+libafl_bolts = {{ version = "0.15.1", features = ["std"] }}
 solana-message = "2.3"
 solana-sdk = "2.3"
 
 {program_name} = {{ path = "../../programs/{program_name}", features = ["no-entrypoint"] }}
 
 [features]
-fuzz_{program_name} = []
+fuzz_single = []
+invariant_test = []
 "#
     )
+}
+
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect()
 }
 
 pub fn fuzz_run(program_name: &str, test_name: &str, release: bool) -> Result<()> {
@@ -172,6 +222,7 @@ pub fn fuzz_run(program_name: &str, test_name: &str, release: bool) -> Result<()
     
     Ok(())
 }
+
 pub fn fuzz_show(program_name: &str, crash_file: &str) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = cwd.join("fuzz").join(program_name);
