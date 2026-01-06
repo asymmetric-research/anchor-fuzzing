@@ -12,7 +12,7 @@ use anchor_lang_idl::convert::convert_idl;
 use anchor_lang_idl::types::{Idl, IdlArrayLen, IdlDefinedFields, IdlType, IdlTypeDefTy};
 use anyhow::{anyhow, bail, Context, Result};
 use checks::{check_anchor_version, check_deps, check_idl_build_feature, check_overflow};
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use dirs::home_dir;
 use heck::{ToKebabCase, ToLowerCamelCase, ToPascalCase, ToSnakeCase};
 use regex::{Regex, RegexBuilder};
@@ -48,7 +48,6 @@ pub mod config;
 mod fuzz;
 mod keygen;
 mod program;
->>>>>>> upstream/master
 pub mod rust_template;
 
 // Version of the docker image.
@@ -424,7 +423,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Subcommand)]
 pub enum KeygenCommand {
     /// Generate a new keypair
     New {
@@ -470,7 +469,6 @@ pub enum KeygenCommand {
         pubkey: Pubkey,
         /// Keypair filepath (defaults to configured wallet)
         keypair: Option<String>,
->>>>>>> upstream/master
     },
 }
 
@@ -793,7 +791,10 @@ pub enum FuzzCommand {
         /// Run in release mode
         #[clap(long)]
         release: bool,
+    }
+}
 
+#[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Get configuration settings from the local Anchor.toml
     Get,
@@ -1347,11 +1348,14 @@ fn process_command(opts: Opts) -> Result<()> {
             );
             Ok(())
         }
-        Command::Fuzz { cmd } => with_workspace(&opts.cfg_override, |_| match cmd {
-            FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
-            FuzzCommand::Show { program_name, crash_file } => fuzz::fuzz_show(&program_name, &crash_file),
-            FuzzCommand::Run { program_name, test_name, release } => fuzz::fuzz_run(&program_name, &test_name, release),
-        }),
+        Command::Fuzz { cmd } => with_workspace(&opts.cfg_override, |_| {
+            match cmd {
+                FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name)?,
+                FuzzCommand::Show { program_name, crash_file } => fuzz::fuzz_show(&program_name, &crash_file)?,
+                FuzzCommand::Run { program_name, test_name, release } => fuzz::fuzz_run(&program_name, &test_name, release)?,
+            }
+            Ok(())
+        })?,
         Command::Address => address(&opts.cfg_override),
         Command::Balance { pubkey, lamports } => balance(&opts.cfg_override, pubkey, lamports),
         Command::Epoch => epoch(&opts.cfg_override),

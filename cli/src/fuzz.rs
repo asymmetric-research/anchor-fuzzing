@@ -79,7 +79,10 @@ fn generate_program_fuzz_harness(program_name: &str) -> String {
     format!(
         r#"use {program_name}::*;
 use anchor_test::*;
-use solana_sdk::{{signature::Keypair, system_program, pubkey::Pubkey, signature::Signer}};
+use solana_keypair::Keypair;
+use solana_signer::Signer;
+use solana_pubkey::Pubkey;
+use anchor_test::anchor_lang::system_program;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -167,8 +170,9 @@ anchor-lang = {{ path = "{anchor_dir}/lang" }}
 arbitrary = {{ version = "1", features = ["derive"] }}
 libafl = {{ version = "0.15.1", features = ["std", "cli", "prelude", "tui_monitor"] }}
 libafl_bolts = {{ version = "0.15.1", features = ["std"] }}
-solana-message = "2.3"
-solana-sdk = "2.3"
+solana-keypair = "3.0"
+solana-pubkey = "3.0"
+solana-signer = "3.0"
 
 {program_name} = {{ path = "../../programs/{program_name}", features = ["no-entrypoint"] }}
 
