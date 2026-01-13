@@ -267,7 +267,7 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
-pub fn fuzz_run(program_name: &str, test_name: &str, release: bool) -> Result<()> {
+pub fn fuzz_run(program_name: &str, test_name: &str, release: bool, coverage: bool) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = cwd.join("fuzz").join(program_name);
 
@@ -286,6 +286,12 @@ pub fn fuzz_run(program_name: &str, test_name: &str, release: bool) -> Result<()
     }
 
     args.extend(["--features".to_string(), test_name.to_string()]);
+
+    // Use `--` to pass arguments to the binary
+    if coverage {
+        args.push("--".to_string());
+        args.push("--coverage".to_string());
+    }
 
     // Run cargo from the fuzz directory (standalone workspace)
     // This ensures artifacts go to fuzz/<program>/target/ instead of root target/

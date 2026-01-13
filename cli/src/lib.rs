@@ -791,6 +791,9 @@ pub enum FuzzCommand {
         /// Run in release mode
         #[clap(long)]
         release: bool,
+        /// Enable coverage tracking and HTML visualization
+        #[clap(long)]
+        coverage: bool,
     }
 }
 
@@ -1352,7 +1355,7 @@ fn process_command(opts: Opts) -> Result<()> {
             match cmd {
                 FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name)?,
                 FuzzCommand::Show { program_name, crash_file } => fuzz::fuzz_show(&program_name, &crash_file)?,
-                FuzzCommand::Run { program_name, test_name, release } => fuzz::fuzz_run(&program_name, &test_name, release)?,
+                FuzzCommand::Run { program_name, test_name, release, coverage } => fuzz::fuzz_run(&program_name, &test_name, release, coverage)?,
             }
             Ok(())
         })?,
