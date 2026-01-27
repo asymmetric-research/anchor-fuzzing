@@ -778,10 +778,14 @@ pub enum FuzzCommand {
         program_name: String,
     },
     Show {
-        /// Name of the program
+        /// Name of the program (or "." to auto-detect from current directory)
         program_name: String,
-        /// Path to the crash file (relative to fuzz/<program>/crashes/)
-        crash_file: String,
+        /// Crash file name (without path). If not provided, lists all crashes.
+        #[clap(required = false)]
+        crash_file: Option<String>,
+        /// Actually replay the crash (requires compilation). Without this flag, shows metadata from .meta.json
+        #[clap(long)]
+        replay: bool,
     },
     Run {
         /// Name of the program
@@ -794,6 +798,9 @@ pub enum FuzzCommand {
         /// Enable coverage tracking and HTML visualization
         #[clap(long)]
         coverage: bool,
+        /// Stop fuzzing after this many seconds
+        #[clap(long)]
+        timeout: Option<u64>,
     }
 }
 
@@ -1351,14 +1358,19 @@ fn process_command(opts: Opts) -> Result<()> {
             );
             Ok(())
         }
-        Command::Fuzz { cmd } => with_workspace(&opts.cfg_override, |_| {
-            match cmd {
-                FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name)?,
-                FuzzCommand::Show { program_name, crash_file } => fuzz::fuzz_show(&program_name, &crash_file)?,
-                FuzzCommand::Run { program_name, test_name, release, coverage } => fuzz::fuzz_run(&program_name, &test_name, release, coverage)?,
-            }
-            Ok(())
-        })?,
+        Command::Fuzz { cmd } => {
+            // Capture original cwd before with_workspace changes it
+            // (needed for fuzz show to work from inside fuzz harness directories)
+            let original_cwd = std::env::current_dir().ok();
+            with_workspace(&opts.cfg_override, |_| {
+                match cmd {
+                    FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name)?,
+                    FuzzCommand::Show { program_name, crash_file, replay } => fuzz::fuzz_show(&program_name, crash_file.as_deref(), replay, original_cwd.as_deref())?,
+                    FuzzCommand::Run { program_name, test_name, release, coverage, timeout } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout)?,
+                }
+                Ok(())
+            })?
+        }
         Command::Address => address(&opts.cfg_override),
         Command::Balance { pubkey, lamports } => balance(&opts.cfg_override, pubkey, lamports),
         Command::Epoch => epoch(&opts.cfg_override),
