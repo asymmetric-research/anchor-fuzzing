@@ -801,7 +801,27 @@ pub enum FuzzCommand {
         /// Stop fuzzing after this many seconds
         #[clap(long)]
         timeout: Option<u64>,
-    }
+        /// Load initial corpus from directory
+        #[clap(long)]
+        corpus_in: Option<std::path::PathBuf>,
+        /// Write new corpus entries to directory
+        #[clap(long)]
+        corpus_out: Option<std::path::PathBuf>,
+        /// Write crash files to directory (default: crashes/<test>/)
+        #[clap(long)]
+        crashes_dir: Option<std::path::PathBuf>,
+        /// Replay a single input file (reproduce finding)
+        #[clap(long)]
+        input: Option<std::path::PathBuf>,
+        /// Run once to validate setup, then exit
+        #[clap(long)]
+        dry_run: bool,
+    },
+    /// List available fuzz tests for a program
+    List {
+        /// Name of the program (if not provided, lists all fuzz harnesses)
+        program_name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1359,17 +1379,13 @@ fn process_command(opts: Opts) -> Result<()> {
             Ok(())
         }
         Command::Fuzz { cmd } => {
-            // Capture original cwd before with_workspace changes it
-            // (needed for fuzz show to work from inside fuzz harness directories)
-            let original_cwd = std::env::current_dir().ok();
-            with_workspace(&opts.cfg_override, |_| {
-                match cmd {
-                    FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name)?,
-                    FuzzCommand::Show { program_name, crash_file, replay } => fuzz::fuzz_show(&program_name, crash_file.as_deref(), replay, original_cwd.as_deref())?,
-                    FuzzCommand::Run { program_name, test_name, release, coverage, timeout } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout)?,
-                }
-                Ok(())
-            })?
+            // Fuzz commands work without Anchor workspace - no with_workspace() needed
+            match cmd {
+                FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
+                FuzzCommand::Show { program_name, crash_file, replay } => fuzz::fuzz_show(&program_name, crash_file.as_deref(), replay, None),
+                FuzzCommand::Run { program_name, test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run),
+                FuzzCommand::List { program_name } => fuzz::fuzz_list(program_name.as_deref()),
+            }
         }
         Command::Address => address(&opts.cfg_override),
         Command::Balance { pubkey, lamports } => balance(&opts.cfg_override, pubkey, lamports),

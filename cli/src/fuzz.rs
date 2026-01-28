@@ -22,12 +22,9 @@ pub struct ActionRecord {
 }
 
 pub fn fuzz_init(program_name: &str) -> Result<()> {
-    // Check program exists
+    // Create fuzz harness - no check for programs/ directory
+    // Works for Anchor, Pinochio, native Solana, or any other program
     let cwd = current_dir()?;
-    let program_path = cwd.join("programs").join(program_name);
-    if !program_path.exists() {
-        bail!("{} does not exist", program_path.display());
-    }
     let fuzz_dir = cwd.join("fuzz");
     configure_workspace_for_fuzzing(&fuzz_dir)?;
     initialize_program_fuzzer(&fuzz_dir, program_name)?;
@@ -230,7 +227,10 @@ fn invariant_test(fixture: &mut {fixture_name}) {{
 }
 
 fn fuzz_target_manifest(program_name: &str) -> String {
-    let anchor_dir = std::env::var("ANCHOR_DIR").expect("set `ANCHOR_DIR` to Anchor source path");
+    // Use GitHub repo for dependencies - no local ANCHOR_DIR needed
+    let repo = "https://github.com/asymmetric-research/anchor-fuzzing";
+    let branch = "feature/fuzzing";
+
     format!(
         r#"[package]
 name = "{program_name}_fuzz"
@@ -241,13 +241,13 @@ edition = "2021"
 # Standalone workspace - isolated from parent project to avoid Solana version conflicts
 
 [dependencies]
-# Fuzzing framework
-anchor-test = {{ path = "{anchor_dir}/fuzz/anchor-test" }}
-anchor-test-context = {{ path = "{anchor_dir}/fuzz/anchor-test/anchor-test-context" }}
-anchor-fuzz-gen = {{ path = "{anchor_dir}/fuzz/anchor-test/anchor-fuzz-gen" }}
+# Fuzzing framework (from GitHub)
+anchor-test = {{ git = "{repo}", branch = "{branch}", package = "anchor-test" }}
+anchor-test-context = {{ git = "{repo}", branch = "{branch}", package = "anchor-test-context" }}
+anchor-fuzz-gen = {{ git = "{repo}", branch = "{branch}", package = "anchor-fuzz-gen" }}
 
-# Anchor (local v3-compatible)
-anchor-lang = {{ path = "{anchor_dir}/lang" }}
+# Anchor (from GitHub - v3-compatible)
+anchor-lang = {{ git = "{repo}", branch = "{branch}", package = "anchor-lang" }}
 
 # Solana v3.x (required for litesvm 0.9.0)
 solana-pubkey = "3.0"
@@ -286,7 +286,18 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
-pub fn fuzz_run(program_name: &str, test_name: &str, release: bool, coverage: bool, timeout: Option<u64>) -> Result<()> {
+pub fn fuzz_run(
+    program_name: &str,
+    test_name: &str,
+    release: bool,
+    coverage: bool,
+    timeout: Option<u64>,
+    corpus_in: Option<std::path::PathBuf>,
+    corpus_out: Option<std::path::PathBuf>,
+    crashes_dir: Option<std::path::PathBuf>,
+    input: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = cwd.join("fuzz").join(program_name);
 
@@ -324,6 +335,64 @@ pub fn fuzz_run(program_name: &str, test_name: &str, release: bool, coverage: bo
         println!("[FUZZ] Running with {}s timeout", timeout_secs);
     }
 
+    // Set corpus input directory
+    if let Some(ref corpus_in_path) = corpus_in {
+        // Convert to absolute path relative to cwd (not fuzz_dir)
+        let abs_path = if corpus_in_path.is_absolute() {
+            corpus_in_path.clone()
+        } else {
+            cwd.join(corpus_in_path)
+        };
+        cmd.env("FUZZ_CORPUS_IN", abs_path);
+        println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
+    }
+
+    // Set corpus output directory
+    if let Some(ref corpus_out_path) = corpus_out {
+        let abs_path = if corpus_out_path.is_absolute() {
+            corpus_out_path.clone()
+        } else {
+            cwd.join(corpus_out_path)
+        };
+        cmd.env("FUZZ_CORPUS_OUT", abs_path);
+        println!("[FUZZ] Writing corpus to: {}", corpus_out_path.display());
+    }
+
+    // Set crashes directory
+    if let Some(ref crashes_path) = crashes_dir {
+        let abs_path = if crashes_path.is_absolute() {
+            crashes_path.clone()
+        } else {
+            cwd.join(crashes_path)
+        };
+        cmd.env("FUZZ_CRASHES_DIR", abs_path);
+        println!("[FUZZ] Writing crashes to: {}", crashes_path.display());
+    }
+
+    // Set single input file for replay
+    if let Some(ref input_path) = input {
+        let abs_path = if input_path.is_absolute() {
+            input_path.clone()
+        } else {
+            cwd.join(input_path)
+        };
+        cmd.env("FUZZ_INPUT_FILE", abs_path);
+        println!("[FUZZ] Replaying input: {}", input_path.display());
+    }
+
+    // Set dry-run mode
+    if dry_run {
+        cmd.env("FUZZ_DRY_RUN", "1");
+        println!("[FUZZ] Dry-run mode: validating setup");
+    }
+
+    // Coverage-only mode: when --coverage and --corpus-in are set but no fuzzing is implied
+    // (no timeout means run coverage on corpus and exit)
+    if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && input.is_none() {
+        cmd.env("FUZZ_COVERAGE_ONLY", "1");
+        println!("[FUZZ] Coverage-only mode: generating coverage from corpus");
+    }
+
     // Run cargo from the fuzz directory (standalone workspace)
     // This ensures artifacts go to fuzz/<program>/target/ instead of root target/
     // Set RUSTUP_TOOLCHAIN=stable to ensure modern Rust is used (libafl requires edition 2024)
@@ -336,22 +405,126 @@ pub fn fuzz_run(program_name: &str, test_name: &str, release: bool, coverage: bo
     Ok(())
 }
 
+/// List available fuzz tests for a program by parsing Cargo.toml features.
+///
+/// If program_name is None, lists all fuzz harnesses in fuzz/ directory.
+pub fn fuzz_list(program_name: Option<&str>) -> Result<()> {
+    let cwd = current_dir()?;
+    let fuzz_root = cwd.join("fuzz");
+
+    match program_name {
+        Some(name) => {
+            // List tests for a specific program
+            let fuzz_dir = fuzz_root.join(name);
+            if !fuzz_dir.exists() {
+                bail!(
+                    "Fuzz directory for {} does not exist. Run `anchor fuzz init {}` first.",
+                    name, name
+                );
+            }
+            list_program_tests(&fuzz_dir, name)?;
+        }
+        None => {
+            // List all fuzz harnesses
+            if !fuzz_root.exists() {
+                println!("No fuzz/ directory found. Run `anchor fuzz init <program>` to create one.");
+                return Ok(());
+            }
+
+            let mut found = false;
+            for entry in std::fs::read_dir(&fuzz_root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() && path.join("Cargo.toml").exists() {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    found = true;
+                    list_program_tests(&path, name)?;
+                }
+            }
+
+            if !found {
+                println!("No fuzz harnesses found in fuzz/ directory.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// List available fuzz tests for a single program by parsing its Cargo.toml features.
+fn list_program_tests(fuzz_dir: &Path, program_name: &str) -> Result<()> {
+    let cargo_toml_path = fuzz_dir.join("Cargo.toml");
+
+    if !cargo_toml_path.exists() {
+        bail!("Cargo.toml not found at {}", cargo_toml_path.display());
+    }
+
+    let content = std::fs::read_to_string(&cargo_toml_path)
+        .context("Failed to read Cargo.toml")?;
+
+    // Parse features from Cargo.toml
+    // Look for [features] section and extract feature names
+    let mut in_features = false;
+    let mut tests = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "[features]" {
+            in_features = true;
+            continue;
+        }
+
+        // Exit features section when we hit another section
+        if in_features && trimmed.starts_with('[') && !trimmed.starts_with("[features") {
+            break;
+        }
+
+        if in_features && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            // Parse feature definition: feature_name = [...]
+            if let Some(eq_pos) = trimmed.find('=') {
+                let feature_name = trimmed[..eq_pos].trim();
+                // Filter out common non-test features
+                if !feature_name.is_empty()
+                    && feature_name != "default"
+                    && feature_name != "fuzz_single"
+                {
+                    tests.push(feature_name.to_string());
+                }
+            }
+        }
+    }
+
+    println!("\n=== {} ===", program_name);
+    if tests.is_empty() {
+        println!("  No fuzz tests found (add features to Cargo.toml)");
+    } else {
+        for test in &tests {
+            println!("  - {}", test);
+        }
+        println!();
+        println!("Run with: anchor fuzz run {} <test_name> --release", program_name);
+    }
+
+    Ok(())
+}
+
 /// Show crash information.
 ///
 /// - No crash_file: List all crashes with metadata
 /// - crash_file without --replay: Display crash metadata from .meta.json
 /// - crash_file with --replay: Actually replay the crash (requires binary)
-pub fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, original_cwd: Option<&Path>) -> Result<()> {
-    // Use original_cwd if provided (before with_workspace changed it), otherwise use current_dir
-    let cwd = original_cwd.map(|p| p.to_path_buf()).unwrap_or_else(|| current_dir().unwrap_or_default());
-    let workspace_cwd = current_dir()?;
+pub fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, _original_cwd: Option<&Path>) -> Result<()> {
+    let cwd = current_dir()?;
 
     // Detect fuzz directory - support running from:
-    // 1. Inside fuzz harness dir: crashes/ exists in original cwd
+    // 1. Inside fuzz harness dir: crashes/ exists in current directory
     // 2. Project root: fuzz/<program>/ exists
-    // 3. "." as program_name: auto-detect from original cwd
+    // 3. "." as program_name: auto-detect from current directory
     let (fuzz_dir, display_name) = if program_name == "." {
-        // Auto-detect from original directory
+        // Auto-detect from current directory
         if cwd.join("crashes").exists() || (cwd.join("Cargo.toml").exists() && cwd.join("src").exists()) {
             let name = cwd.file_name()
                 .and_then(|n| n.to_str())
@@ -362,11 +535,11 @@ pub fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, ori
             bail!("Cannot auto-detect fuzz harness. Run from within fuzz harness directory or specify program name.");
         }
     } else if cwd.join("crashes").exists() {
-        // Already in a fuzz harness directory (original cwd)
+        // Already in a fuzz harness directory
         (cwd.clone(), program_name.to_string())
     } else {
-        // Try workspace root layout
-        let fuzz_path = workspace_cwd.join("fuzz").join(program_name);
+        // Try project root layout: fuzz/<program>/
+        let fuzz_path = cwd.join("fuzz").join(program_name);
         if fuzz_path.exists() {
             (fuzz_path, program_name.to_string())
         } else {
