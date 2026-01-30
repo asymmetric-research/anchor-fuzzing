@@ -1,4 +1,4 @@
-use std::{env::current_dir, fs::create_dir_all, path::Path, io::Write};
+use std::{env::current_dir, fs::create_dir_all, path::Path};
 
 use anyhow::{bail, Context, Result};
 use serde::{Serialize, Deserialize};
@@ -739,6 +739,9 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
 
     // Search for the crash binary file in all test directories
     let mut crash_path = None;
+    let mut found_metadata_only = false;
+    let mut available_inputs: Vec<String> = Vec::new();
+
     for entry in std::fs::read_dir(&crashes_dir).unwrap_or_else(|_| {
         std::fs::read_dir(".").unwrap()
     }) {
@@ -748,7 +751,7 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
                 continue;
             }
 
-            // Try exact match first
+            // Try exact match first (new format: crash_<hash>)
             let candidate = test_dir.join(crash_name);
             if candidate.exists() && candidate.is_file() {
                 crash_path = Some(candidate);
@@ -763,21 +766,61 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
                     break;
                 }
             }
+
+            // Check if we have metadata but no input file (legacy crash)
+            let meta_path = test_dir.join(format!("{}.meta.json", crash_name));
+            if meta_path.exists() && crash_path.is_none() {
+                found_metadata_only = true;
+
+                // Collect available input files in this directory for the error message
+                if let Ok(dir_entries) = std::fs::read_dir(&test_dir) {
+                    for dir_entry in dir_entries.filter_map(|e| e.ok()) {
+                        let path = dir_entry.path();
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            // Skip hidden files, metadata files
+                            if !name.starts_with('.')
+                                && !name.ends_with(".meta.json")
+                                && !name.ends_with(".metadata")
+                                && path.is_file()
+                            {
+                                available_inputs.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     let crash_path = crash_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Crash file not found: {}\n\
-             Looking in: {}/crashes/*/\n\
-             Use `anchor fuzz show {}` to list available crashes.",
-            crash_name,
-            fuzz_dir.display(),
-            program_name
-        )
+        if found_metadata_only {
+            let mut msg = format!(
+                "Crash metadata found for '{}', but input bytes file is missing.\n\
+                 This crash was created before input bytes were saved alongside metadata.\n\n",
+                crash_name
+            );
+            if !available_inputs.is_empty() {
+                msg.push_str("Available crash input files that can be replayed:\n");
+                for (i, input) in available_inputs.iter().take(5).enumerate() {
+                    msg.push_str(&format!("  {}. {}\n", i + 1, input));
+                }
+                if available_inputs.len() > 5 {
+                    msg.push_str(&format!("  ... and {} more\n", available_inputs.len() - 5));
+                }
+                msg.push_str(&format!("\nTry: anchor fuzz show {} <input_name> --replay", program_name));
+            }
+            anyhow::anyhow!(msg)
+        } else {
+            anyhow::anyhow!(
+                "Crash file not found: {}\n\
+                 Looking in: {}/crashes/*/\n\
+                 Use `anchor fuzz show {}` to list available crashes.",
+                crash_name,
+                fuzz_dir.display(),
+                program_name
+            )
+        }
     })?;
-
-    let crash_bytes = std::fs::read(&crash_path).context("Failed to read crash file")?;
 
     // Find the fuzz binary
     let package_name = format!("{}_fuzz", program_name);
@@ -807,26 +850,26 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
     println!("Replaying crash: {}", crash_path.display());
     println!("Using binary: {}\n", binary_path.display());
 
-    // Run with SHOW_CRASH=1
-    let mut child = std::process::Command::new(binary_path)
-        .env("SHOW_CRASH", "1")
-        .stdin(std::process::Stdio::piped())
+    // Run with FUZZ_INPUT_FILE to actually replay the crash (not just show the input)
+    // Run from fuzz_dir so relative paths (like program.so) work correctly
+    let status = std::process::Command::new(&binary_path)
+        .current_dir(fuzz_dir)
+        .env("FUZZ_INPUT_FILE", &crash_path)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to spawn show process")?;
-
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(&crash_bytes)
-        .context("Failed to write crash data to stdin")?;
-
-    let status = child.wait().context("Failed to wait for show process")?;
+        .status()
+        .context("Failed to run replay")?;
 
     if !status.success() {
-        bail!("Replay failed");
+        // Exit code 1 means crash was reproduced (expected)
+        if status.code() == Some(1) {
+            println!("\nCrash successfully reproduced!");
+        } else {
+            bail!("Replay failed with exit code: {:?}", status.code());
+        }
+    } else {
+        println!("\nReplay completed without crash.");
+        println!("Note: If you expected a crash, the input may be from a different harness version.");
     }
 
     Ok(())
