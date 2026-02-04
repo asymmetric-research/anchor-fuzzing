@@ -816,11 +816,33 @@ pub enum FuzzCommand {
         /// Run once to validate setup, then exit
         #[clap(long)]
         dry_run: bool,
+        /// Number of parallel fuzzer cores/workers (uses fork + LLMP)
+        #[clap(short = 'j', long)]
+        cores: Option<usize>,
     },
     /// List available fuzz tests for a program
     List {
         /// Name of the program (if not provided, lists all fuzz harnesses)
         program_name: Option<String>,
+    },
+    /// Minimize corpus to smallest set preserving coverage (like afl-cmin)
+    Cmin {
+        /// Name of the program
+        program_name: String,
+        /// Name of the fuzz test function
+        test_name: String,
+        /// Input corpus directory (positional, for backwards compatibility)
+        #[clap(required = false)]
+        corpus_dir: Option<std::path::PathBuf>,
+        /// Input corpus directory (flag, consistent with `fuzz run --corpus-in`)
+        #[clap(long = "corpus-in")]
+        corpus_in: Option<std::path::PathBuf>,
+        /// Output directory for minimized corpus (default: overwrites corpus_in)
+        #[clap(long)]
+        corpus_out: Option<std::path::PathBuf>,
+        /// Run in release mode
+        #[clap(long)]
+        release: bool,
     },
 }
 
@@ -1383,8 +1405,15 @@ fn process_command(opts: Opts) -> Result<()> {
             match cmd {
                 FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
                 FuzzCommand::Show { program_name, crash_file, replay } => fuzz::fuzz_show(&program_name, crash_file.as_deref(), replay, None),
-                FuzzCommand::Run { program_name, test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run),
+                FuzzCommand::Run { program_name, test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores),
                 FuzzCommand::List { program_name } => fuzz::fuzz_list(program_name.as_deref()),
+                FuzzCommand::Cmin { program_name, test_name, corpus_dir, corpus_in, corpus_out, release } => {
+                    // Accept either --corpus-in flag or positional corpus_dir (for backwards compat)
+                    let corpus_path = corpus_in.or(corpus_dir).ok_or_else(|| {
+                        anyhow::anyhow!("Missing corpus directory. Use --corpus-in <path> or provide as positional argument.")
+                    })?;
+                    fuzz::fuzz_cmin(&program_name, &test_name, &corpus_path, corpus_out.as_deref(), release)
+                }
             }
         }
         Command::Address => address(&opts.cfg_override),

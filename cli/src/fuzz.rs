@@ -297,6 +297,7 @@ pub fn fuzz_run(
     crashes_dir: Option<std::path::PathBuf>,
     input: Option<std::path::PathBuf>,
     dry_run: bool,
+    cores: Option<usize>,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = cwd.join("fuzz").join(program_name);
@@ -358,16 +359,20 @@ pub fn fuzz_run(
         println!("[FUZZ] Writing corpus to: {}", corpus_out_path.display());
     }
 
-    // Set crashes directory
-    if let Some(ref crashes_path) = crashes_dir {
-        let abs_path = if crashes_path.is_absolute() {
+    // Set crashes directory - always use absolute path
+    // Default location is {fuzz_dir}/crashes/{test_name}
+    let crashes_abs_path = if let Some(ref crashes_path) = crashes_dir {
+        if crashes_path.is_absolute() {
             crashes_path.clone()
         } else {
             cwd.join(crashes_path)
-        };
-        cmd.env("FUZZ_CRASHES_DIR", abs_path);
-        println!("[FUZZ] Writing crashes to: {}", crashes_path.display());
-    }
+        }
+    } else {
+        // Default: crashes inside fuzz harness directory
+        fuzz_dir.join("crashes").join(test_name)
+    };
+    cmd.env("FUZZ_CRASHES_DIR", &crashes_abs_path);
+    println!("[FUZZ] Crashes directory: {}", crashes_abs_path.display());
 
     // Set single input file for replay
     if let Some(ref input_path) = input {
@@ -384,6 +389,12 @@ pub fn fuzz_run(
     if dry_run {
         cmd.env("FUZZ_DRY_RUN", "1");
         println!("[FUZZ] Dry-run mode: validating setup");
+    }
+
+    // Set multi-core mode
+    if let Some(num_cores) = cores {
+        cmd.env("FUZZ_CORES", num_cores.to_string());
+        println!("[FUZZ] Multi-core mode: {} parallel workers", num_cores);
     }
 
     // Coverage-only mode: when --coverage and --corpus-in are set but no fuzzing is implied
@@ -520,12 +531,12 @@ pub fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, _or
     let cwd = current_dir()?;
 
     // Detect fuzz directory - support running from:
-    // 1. Inside fuzz harness dir: crashes/ exists in current directory
-    // 2. Project root: fuzz/<program>/ exists
+    // 1. Project root: fuzz/<program>/ exists (prioritized)
+    // 2. Inside fuzz harness dir: Cargo.toml + src/ exists
     // 3. "." as program_name: auto-detect from current directory
     let (fuzz_dir, display_name) = if program_name == "." {
         // Auto-detect from current directory
-        if cwd.join("crashes").exists() || (cwd.join("Cargo.toml").exists() && cwd.join("src").exists()) {
+        if cwd.join("Cargo.toml").exists() && cwd.join("src").exists() {
             let name = cwd.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
@@ -534,14 +545,14 @@ pub fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, _or
         } else {
             bail!("Cannot auto-detect fuzz harness. Run from within fuzz harness directory or specify program name.");
         }
-    } else if cwd.join("crashes").exists() {
-        // Already in a fuzz harness directory
-        (cwd.clone(), program_name.to_string())
     } else {
-        // Try project root layout: fuzz/<program>/
+        // Try project root layout first: fuzz/<program>/
         let fuzz_path = cwd.join("fuzz").join(program_name);
         if fuzz_path.exists() {
             (fuzz_path, program_name.to_string())
+        } else if cwd.join("Cargo.toml").exists() && cwd.join("src").exists() {
+            // Already in a fuzz harness directory
+            (cwd.clone(), program_name.to_string())
         } else {
             bail!(
                 "Fuzz directory not found. Either:\n  \
@@ -576,11 +587,12 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str) -> Result<()> {
     let crashes_dir = fuzz_dir.join("crashes");
 
     if !crashes_dir.exists() {
-        println!("No crashes directory found. Run the fuzzer first.");
+        println!("No crashes directory found at: {}", crashes_dir.display());
+        println!("Run the fuzzer first to generate crashes.");
         return Ok(());
     }
 
-    // Find all .meta.json files in crashes/*/
+    // Find all crash files in crashes/*/ (organized by test name)
     let mut crashes = Vec::new();
 
     for entry in std::fs::read_dir(&crashes_dir)? {
@@ -598,12 +610,17 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str) -> Result<()> {
         for file_entry in std::fs::read_dir(&test_dir)? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
-            // Look for .meta.json files
             let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            // Skip hidden files and metadata files
+            if filename.starts_with('.') || filename.ends_with(".metadata") {
+                continue;
+            }
+
+            // Look for .meta.json files (harness crash metadata)
             if filename.ends_with(".meta.json") {
                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                     if let Ok(meta) = serde_json::from_str::<CrashMetadata>(&content) {
-                        // Extract crash_id by removing .meta.json suffix
                         let crash_id = filename.strip_suffix(".meta.json").unwrap_or(filename).to_string();
                         crashes.push((crash_id, test_name.clone(), meta));
                     }
@@ -613,7 +630,7 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str) -> Result<()> {
     }
 
     if crashes.is_empty() {
-        println!("No crashes found for {}.", program_name);
+        println!("No crashes found for {} in: {}", program_name, crashes_dir.display());
         return Ok(());
     }
 
@@ -822,7 +839,7 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
         }
     })?;
 
-    // Find the fuzz binary
+    // Find the fuzz binary (binary name matches package name exactly)
     let package_name = format!("{}_fuzz", program_name);
     let release_binary = fuzz_dir
         .join("target")
@@ -870,6 +887,114 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
     } else {
         println!("\nReplay completed without crash.");
         println!("Note: If you expected a crash, the input may be from a different harness version.");
+    }
+
+    Ok(())
+}
+
+/// Minimize corpus to smallest set that preserves coverage (like afl-cmin).
+///
+/// This runs each input in the corpus once to collect coverage, then uses
+/// greedy set cover to select the minimum set of inputs that preserve all coverage.
+pub fn fuzz_cmin(
+    program_name: &str,
+    test_name: &str,
+    corpus_in: &Path,
+    corpus_out: Option<&Path>,
+    release: bool,
+) -> Result<()> {
+    let cwd = current_dir()?;
+    let fuzz_dir = cwd.join("fuzz").join(program_name);
+
+    if !fuzz_dir.exists() {
+        bail!(
+            "Fuzz directory for {} does not exist. Run `anchor fuzz init {}` first.",
+            program_name,
+            program_name
+        );
+    }
+
+    // Verify corpus_in exists
+    let corpus_in_abs = if corpus_in.is_absolute() {
+        corpus_in.to_path_buf()
+    } else {
+        cwd.join(corpus_in)
+    };
+
+    if !corpus_in_abs.exists() {
+        bail!("Corpus directory does not exist: {}", corpus_in_abs.display());
+    }
+
+    // Count inputs
+    let input_count = std::fs::read_dir(&corpus_in_abs)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let path = e.path();
+            if !path.is_file() { return false; }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            !name.starts_with('.') && !name.ends_with(".metadata") && !name.ends_with(".meta.json")
+        })
+        .count();
+
+    if input_count == 0 {
+        bail!("No corpus inputs found in: {}", corpus_in_abs.display());
+    }
+
+    println!("[CMIN] Minimizing corpus: {} ({} inputs)", corpus_in_abs.display(), input_count);
+
+    // Determine output directory
+    let corpus_out_abs = corpus_out
+        .map(|p| if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) })
+        .unwrap_or_else(|| corpus_in_abs.clone());
+
+    if corpus_out_abs != corpus_in_abs {
+        std::fs::create_dir_all(&corpus_out_abs)?;
+        println!("[CMIN] Output directory: {}", corpus_out_abs.display());
+    }
+
+    // Build the binary
+    let mut build_args = vec!["build".to_string()];
+    if release {
+        build_args.push("--release".to_string());
+    }
+    build_args.extend(["--features".to_string(), test_name.to_string()]);
+
+    println!("[CMIN] Building {} harness...", if release { "release" } else { "debug" });
+
+    let build_status = std::process::Command::new("cargo")
+        .current_dir(&fuzz_dir)
+        .env("RUSTUP_TOOLCHAIN", "stable")
+        .args(&build_args)
+        .status()
+        .context("Failed to build fuzz harness")?;
+
+    if !build_status.success() {
+        bail!("Build failed");
+    }
+
+    // Run the binary with FUZZ_CMIN mode (binary name matches package name exactly)
+    let binary_name = format!("{}_fuzz", program_name);
+    let profile = if release { "release" } else { "debug" };
+    let binary_path = fuzz_dir.join("target").join(profile).join(&binary_name);
+
+    if !binary_path.exists() {
+        bail!("Binary not found at: {}", binary_path.display());
+    }
+
+    println!("[CMIN] Running corpus minimization...");
+
+    let status = std::process::Command::new(&binary_path)
+        .current_dir(&fuzz_dir)
+        .env("FUZZ_CMIN", "1")
+        .env("FUZZ_CORPUS_IN", &corpus_in_abs)
+        .env("FUZZ_CORPUS_OUT", &corpus_out_abs)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("Failed to run corpus minimization")?;
+
+    if !status.success() {
+        bail!("Corpus minimization failed with exit code: {:?}", status.code());
     }
 
     Ok(())
