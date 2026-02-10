@@ -819,6 +819,12 @@ pub enum FuzzCommand {
         /// Number of parallel fuzzer cores/workers (uses fork + LLMP)
         #[clap(short = 'j', long)]
         cores: Option<usize>,
+        /// Random seed for reproducible fuzzing
+        #[clap(long)]
+        seed: Option<u64>,
+        /// Stop fuzzing when the first crash is found
+        #[clap(long)]
+        stop_on_crash: bool,
     },
     /// List available fuzz tests for a program
     List {
@@ -1405,7 +1411,7 @@ fn process_command(opts: Opts) -> Result<()> {
             match cmd {
                 FuzzCommand::Init { program_name } => fuzz::fuzz_init(&program_name),
                 FuzzCommand::Show { program_name, crash_file, replay } => fuzz::fuzz_show(&program_name, crash_file.as_deref(), replay, None),
-                FuzzCommand::Run { program_name, test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores),
+                FuzzCommand::Run { program_name, test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores, seed, stop_on_crash } => fuzz::fuzz_run(&program_name, &test_name, release, coverage, timeout, corpus_in, corpus_out, crashes_dir, input, dry_run, cores, seed, stop_on_crash),
                 FuzzCommand::List { program_name } => fuzz::fuzz_list(program_name.as_deref()),
                 FuzzCommand::Cmin { program_name, test_name, corpus_dir, corpus_in, corpus_out, release } => {
                     // Accept either --corpus-in flag or positional corpus_dir (for backwards compat)

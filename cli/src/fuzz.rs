@@ -1,4 +1,4 @@
-use std::{env::current_dir, fs::create_dir_all, path::Path};
+use std::{env::current_dir, fs::create_dir_all, path::{Path, PathBuf}};
 
 use anyhow::{bail, Context, Result};
 use serde::{Serialize, Deserialize};
@@ -298,6 +298,8 @@ pub fn fuzz_run(
     input: Option<std::path::PathBuf>,
     dry_run: bool,
     cores: Option<usize>,
+    seed: Option<u64>,
+    stop_on_crash: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = cwd.join("fuzz").join(program_name);
@@ -336,7 +338,7 @@ pub fn fuzz_run(
         println!("[FUZZ] Running with {}s timeout", timeout_secs);
     }
 
-    // Set corpus input directory
+    // Set corpus input directory (skip if doesn't exist or is empty)
     if let Some(ref corpus_in_path) = corpus_in {
         // Convert to absolute path relative to cwd (not fuzz_dir)
         let abs_path = if corpus_in_path.is_absolute() {
@@ -344,8 +346,20 @@ pub fn fuzz_run(
         } else {
             cwd.join(corpus_in_path)
         };
-        cmd.env("FUZZ_CORPUS_IN", abs_path);
-        println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
+
+        // Check if directory exists and has files
+        let has_inputs = abs_path.exists() && std::fs::read_dir(&abs_path)
+            .map(|mut d| d.any(|e| e.is_ok()))
+            .unwrap_or(false);
+
+        if has_inputs {
+            cmd.env("FUZZ_CORPUS_IN", abs_path);
+            println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
+        } else if abs_path.exists() {
+            println!("[FUZZ] Corpus directory is empty, skipping: {}", corpus_in_path.display());
+        } else {
+            println!("[FUZZ] Corpus directory does not exist, skipping: {}", corpus_in_path.display());
+        }
     }
 
     // Set corpus output directory
@@ -395,6 +409,18 @@ pub fn fuzz_run(
     if let Some(num_cores) = cores {
         cmd.env("FUZZ_CORES", num_cores.to_string());
         println!("[FUZZ] Multi-core mode: {} parallel workers", num_cores);
+    }
+
+    // Set random seed for reproducibility
+    if let Some(seed_val) = seed {
+        cmd.env("FUZZ_SEED", seed_val.to_string());
+        println!("[FUZZ] Using seed: {}", seed_val);
+    }
+
+    // Set stop-on-crash mode
+    if stop_on_crash {
+        cmd.env("FUZZ_STOP_ON_CRASH", "1");
+        println!("[FUZZ] Stop-on-crash enabled");
     }
 
     // Coverage-only mode: when --coverage and --corpus-in are set but no fuzzing is implied
@@ -749,6 +775,58 @@ fn format_json_value_compact(v: &serde_json::Value) -> String {
     }
 }
 
+/// Find the fuzz binary by querying cargo for the actual target directory and package name.
+/// This handles both standalone workspaces (fuzz_dir is workspace root) and member crates
+/// (fuzz_dir is a member of a parent workspace, binary goes to parent's target/).
+fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Result<PathBuf> {
+    // Use cargo metadata to find the actual target directory and package name
+    let output = std::process::Command::new("cargo")
+        .current_dir(fuzz_dir)
+        .args(["metadata", "--format-version=1", "--no-deps"])
+        .output()
+        .context("Failed to run cargo metadata")?;
+
+    if output.status.success() {
+        if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            let target_dir = metadata["target_directory"].as_str().unwrap_or("");
+            if !target_dir.is_empty() {
+                // Try the actual package name from metadata first
+                if let Some(packages) = metadata["packages"].as_array() {
+                    for package in packages {
+                        let pkg_name = package["name"].as_str().unwrap_or("");
+                        if pkg_name.contains(program_name) || pkg_name.contains(&program_name.replace('-', "_")) {
+                            let binary = PathBuf::from(target_dir).join(profile).join(pkg_name);
+                            if binary.exists() {
+                                return Ok(binary);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: try standard convention {program_name}_fuzz
+                let standard_name = format!("{}_fuzz", program_name);
+                let standard_path = PathBuf::from(target_dir).join(profile).join(&standard_name);
+                if standard_path.exists() {
+                    return Ok(standard_path);
+                }
+            }
+        }
+    }
+
+    // Final fallback: original behavior (fuzz_dir/target/{profile}/{program_name}_fuzz)
+    let package_name = format!("{}_fuzz", program_name);
+    let fallback = fuzz_dir.join("target").join(profile).join(&package_name);
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+
+    bail!(
+        "Fuzz binary not found. Searched for package matching '{}' in target directory.\n\
+         Build it first with: anchor fuzz run {} <test_name>",
+        program_name, program_name
+    )
+}
+
 /// Replay a crash by running the binary with SHOW_CRASH=1
 fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result<()> {
     // Find the crash file (binary data)
@@ -839,30 +917,9 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
         }
     })?;
 
-    // Find the fuzz binary (binary name matches package name exactly)
-    let package_name = format!("{}_fuzz", program_name);
-    let release_binary = fuzz_dir
-        .join("target")
-        .join("release")
-        .join(&package_name);
-    let debug_binary = fuzz_dir
-        .join("target")
-        .join("debug")
-        .join(&package_name);
-
-    let binary_path = if release_binary.exists() {
-        release_binary
-    } else if debug_binary.exists() {
-        debug_binary
-    } else {
-        bail!(
-            "Fuzz binary not found at {} or {}.\n\
-             Build it first with: anchor fuzz run {} <test_name>",
-            release_binary.display(),
-            debug_binary.display(),
-            program_name
-        );
-    };
+    // Find the fuzz binary using cargo metadata (handles both standalone and workspace member)
+    let binary_path = find_fuzz_binary(fuzz_dir, program_name, "release")
+        .or_else(|_| find_fuzz_binary(fuzz_dir, program_name, "debug"))?;
 
     println!("Replaying crash: {}", crash_path.display());
     println!("Using binary: {}\n", binary_path.display());
@@ -972,14 +1029,9 @@ pub fn fuzz_cmin(
         bail!("Build failed");
     }
 
-    // Run the binary with FUZZ_CMIN mode (binary name matches package name exactly)
-    let binary_name = format!("{}_fuzz", program_name);
+    // Find the binary using cargo metadata (handles both standalone and workspace member)
     let profile = if release { "release" } else { "debug" };
-    let binary_path = fuzz_dir.join("target").join(profile).join(&binary_name);
-
-    if !binary_path.exists() {
-        bail!("Binary not found at: {}", binary_path.display());
-    }
+    let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
 
     println!("[CMIN] Running corpus minimization...");
 
